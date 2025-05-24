@@ -8,7 +8,7 @@ import sys
 import logging
 import backoff
 from requests.exceptions import RequestException
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 
 ### Install the following packages in PyCharm terminal:
 ### pip install google-auth-oauthlib google-auth google-api-python-client requests backoff
@@ -264,6 +264,7 @@ class IndexingManager:
         client_secret_file: str,
         index_type: int = 1,
         daily_limit: int = 200,
+        start_offset: int = 0,
     ):
         """
         Initialize IndexingManager class
@@ -273,13 +274,44 @@ class IndexingManager:
             client_secret_file: Google API client secret file path
             index_type: Index type (0: delete index, 1: register index)
             daily_limit: Daily processing limit
+            start_offset: Number of URLs to skip from the beginning
         """
         self.sitemap_url = sitemap_url
         self.client_secret_file = client_secret_file
         self.index_type = index_type
         self.daily_limit = daily_limit
+        self.start_offset = start_offset
         self.sitemap_processor = SitemapProcessor(sitemap_url)
         self.indexing_api = GoogleIndexingAPI(client_secret_file, index_type)
+        self.processed_urls = set()
+        self.processed_urls_file = "processed_urls.txt"
+
+    def load_processed_urls(self):
+        """Load previously processed URLs from file."""
+        if os.path.exists(self.processed_urls_file):
+            try:
+                with open(self.processed_urls_file, "r", encoding="utf-8") as f:
+                    self.processed_urls = set(
+                        line.strip() for line in f if line.strip()
+                    )
+                logger.info(
+                    f"Loaded {len(self.processed_urls)} previously processed URLs."
+                )
+            except Exception as e:
+                logger.error(f"Error loading processed URLs: {e}")
+                self.processed_urls = set()
+        else:
+            logger.info("No previous processed URLs file found. Starting fresh.")
+
+    def save_processed_urls(self):
+        """Save processed URLs to file."""
+        try:
+            with open(self.processed_urls_file, "w", encoding="utf-8") as f:
+                for url in sorted(self.processed_urls):
+                    f.write(f"{url}\n")
+            logger.info(f"Saved {len(self.processed_urls)} processed URLs to file.")
+        except Exception as e:
+            logger.error(f"Error saving processed URLs: {e}")
 
     def run(self) -> bool:
         """
@@ -289,6 +321,9 @@ class IndexingManager:
             bool: Operation success status
         """
         try:
+            # 0. Load previously processed URLs
+            self.load_processed_urls()
+
             # 1. API authentication
             if not self.indexing_api.authenticate():
                 logger.error("Google API authentication failed.")
@@ -300,31 +335,60 @@ class IndexingManager:
                 logger.error("Could not extract URLs from sitemap.")
                 return False
 
-            # 3. Display extracted URL list
-            logger.info("Extracted URL list (max 10 displayed):")
-            for idx, url in enumerate(urls_to_index[:10], 1):
-                logger.info(f"{idx}. {url}")
-            if len(urls_to_index) > 10:
-                logger.info(f"... and {len(urls_to_index) - 10} more")
+            # 3. Filter out already processed URLs
+            remaining_urls = [
+                url for url in urls_to_index if url not in self.processed_urls
+            ]
 
-            # 4. Handle daily limit
-            urls_to_process = urls_to_index[: self.daily_limit]
-            if len(urls_to_index) > self.daily_limit:
-                logger.warning(
-                    f"Warning: Processing only {self.daily_limit} URLs out of {len(urls_to_index)} total URLs due to daily limit."
+            logger.info(f"Total URLs in sitemap: {len(urls_to_index)}")
+            logger.info(f"Already processed: {len(self.processed_urls)}")
+            logger.info(f"Remaining to process: {len(remaining_urls)}")
+
+            if not remaining_urls:
+                logger.info("All URLs have already been processed!")
+                return True
+
+            # 4. Apply start offset if specified
+            if self.start_offset > 0:
+                logger.info(
+                    f"Skipping first {self.start_offset} URLs from remaining list"
                 )
+                remaining_urls = remaining_urls[self.start_offset :]
+                logger.info(f"URLs after offset: {len(remaining_urls)}")
 
-            # 5. Execute indexing operation
+            if not remaining_urls:
+                logger.info("No URLs remaining after applying offset!")
+                return True
+
+            # 5. Handle daily limit - take only daily_limit URLs from remaining
+            urls_to_process_today = remaining_urls[: self.daily_limit]
+
+            logger.info(
+                f"Processing {len(urls_to_process_today)} URLs today (daily limit: {self.daily_limit})"
+            )
+
+            # 6. Display URLs to be processed today
+            logger.info("URLs to be processed today (max 10 displayed):")
+            for idx, url in enumerate(urls_to_process_today[:10], 1):
+                logger.info(f"{idx}. {url}")
+            if len(urls_to_process_today) > 10:
+                logger.info(f"... and {len(urls_to_process_today) - 10} more")
+
+            # 7. Execute indexing operation
             logger.info("\nStarting index registration with Google Search Console...\n")
-            for idx, url in enumerate(urls_to_process, 1):
+            for idx, url in enumerate(urls_to_process_today, 1):
                 try:
-                    logger.info(f"[{idx}/{len(urls_to_process)}] Processing: {url}")
+                    logger.info(
+                        f"[{idx}/{len(urls_to_process_today)}] Processing: {url}"
+                    )
                     response = self.indexing_api.notify_url_updated(url)
 
                     if "error" in response:
                         logger.error(f"Error: {response['error']}")
                     else:
                         logger.info(f"Result: {response}")
+                        # Mark URL as processed only if successful
+                        self.processed_urls.add(url)
 
                     # Delay to prevent API rate limiting
                     time.sleep(1)
@@ -337,36 +401,47 @@ class IndexingManager:
                     # Continue with non-fatal errors
                     continue
 
-            # 6. Result summary
-            self._print_summary()
+            # 8. Save processed URLs to file
+            self.save_processed_urls()
+
+            # 9. Result summary
+            self._print_summary(len(remaining_urls))
             return True
 
         except KeyboardInterrupt:
             logger.warning("\nProgram interrupted by user.")
-            self._print_summary()
+            self.save_processed_urls()
+            self._print_summary(
+                len(remaining_urls) if "remaining_urls" in locals() else 0
+            )
             return False
         except Exception as e:
             logger.error(f"Error occurred during operation: {e}")
             return False
 
-    def _print_summary(self):
+    def _print_summary(self, total_remaining_before_today=0):
         """Print operation result summary."""
         logger.info("\n=== Processing Result Summary ===")
-        logger.info(
-            f"Total processed URLs: {self.indexing_api.success_count + self.indexing_api.error_count}"
-        )
-        logger.info(f"Successful: {self.indexing_api.success_count}")
-        logger.info(f"Failed: {self.indexing_api.error_count}")
-        logger.info("\nAll URL processing completed.")
+        logger.info(f"URLs processed today: {self.indexing_api.success_count}")
+        logger.info(f"Errors today: {self.indexing_api.error_count}")
+        logger.info(f"Total processed so far: {len(self.processed_urls)}")
+        if total_remaining_before_today > self.daily_limit:
+            remaining_after_today = total_remaining_before_today - self.daily_limit
+            logger.info(f"Remaining URLs to process: {remaining_after_today}")
+            logger.info(
+                f"Estimated days to complete: {(remaining_after_today + self.daily_limit - 1) // self.daily_limit}"
+            )
+        logger.info("\nToday's processing completed.")
 
 
 def main():
     """Main function"""
     # Default configuration values
     sitemap_url = "https://textmachine.org/sitemap.xml"
-    client_secret_file = "client_secret_1092233429048-mkdns68ootdslvpm8gupah7udl1bb08u.apps.googleusercontent.com.json"
+    client_secret_file = os.getenv("GOOGLE_CLIENT_SECRET_FILE")
     index_type = 1  # 1: register index, 0: delete index
-    daily_limit = 800  # Daily processing limit
+    daily_limit = 200  # Daily processing limit
+    start_offset = 200  # Number of URLs to skip from the beginning
 
     logger.info("=== Google Search Console Indexing Tool ===")
     logger.info(f"Sitemap URL: {sitemap_url}")
@@ -374,6 +449,7 @@ def main():
         f"Operation type: {'Index registration' if index_type == 1 else 'Index deletion'}"
     )
     logger.info(f"Daily limit: {daily_limit}")
+    logger.info(f"Start offset: {start_offset}")
 
     # Check client secret file
     if not os.path.exists(client_secret_file):
@@ -386,6 +462,7 @@ def main():
         client_secret_file=client_secret_file,
         index_type=index_type,
         daily_limit=daily_limit,
+        start_offset=start_offset,
     )
 
     success = manager.run()
