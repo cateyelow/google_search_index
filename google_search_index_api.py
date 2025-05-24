@@ -441,7 +441,7 @@ def main():
     client_secret_file = os.getenv("GOOGLE_CLIENT_SECRET_FILE")
     index_type = 1  # 1: register index, 0: delete index
     daily_limit = 200  # Daily processing limit
-    start_offset = 200  # Number of URLs to skip from the beginning
+    start_offset = 0  # Number of URLs to skip from the beginning
 
     logger.info("=== Google Search Console Indexing Tool ===")
     logger.info(f"Sitemap URL: {sitemap_url}")
