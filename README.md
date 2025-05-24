@@ -81,7 +81,7 @@ The tool comes with sensible defaults that you can customize:
 sitemap_url = "https://textmachine.org/sitemap.xml"  # Your sitemap URL
 index_type = 1                                       # 1: Register, 0: Delete
 daily_limit = 200                                    # URLs per day
-start_offset = 200                                   # URLs to skip from beginning
+start_offset = 0                                   # URLs to skip from beginning
 ```
 
 ### Customization Options
